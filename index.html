@@ -128,6 +128,7 @@ var METRICS = [
 ];
 
 var S, UI, drafts = {}, ioText = "", ioMode = null, ioMsg = "";
+var MAIL = "K_artem16@mail.ru", EKEY = "gym-export-at";
 
 /* ---------- утилиты ---------- */
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
@@ -158,6 +159,14 @@ function bestSet(list) {
   return b;
 }
 function sumSets(e) { return !e || !e.sets ? "" : e.sets.map(function (s) { return s.weight + "×" + s.reps; }).join(", "); }
+function isDeloadWeek(weekId) {
+  var w = null;
+  S.weeks.forEach(function (x) { if (x.id === weekId) w = x; });
+  return !!(w && w.deload);
+}
+// в блоки идут только рабочие записи обычных недель
+function countsForBlocks(l) { return !l.light && !isDeloadWeek(l.weekId); }
+function blockEntries(exId) { return entriesFor(exId).filter(countsForBlocks); }
 function exById(id) { for (var i = 0; i < S.exercises.length; i++) if (S.exercises[i].id === id) return S.exercises[i]; return null; }
 function num(v) { var n = parseFloat(String(v).replace(",", ".")); return isFinite(n) ? n : 0; }
 
@@ -227,11 +236,53 @@ function persistUI() {
   try { localStorage.setItem(UKEY, JSON.stringify({ tab: UI.tab, weekId: UI.weekId, day: UI.day })); } catch (e) {}
 }
 
+/* ---------- резервные копии ---------- */
+function backupText() { return JSON.stringify({ exercises: S.exercises, logs: S.logs, weeks: S.weeks }); }
+function backupName() { return "progressiya-" + todayISO() + ".json"; }
+function markExport() { try { localStorage.setItem(EKEY, todayISO()); } catch (e) {} }
+function lastExport() { try { return localStorage.getItem(EKEY); } catch (e) { return null; } }
+function daysSinceExport() {
+  var v = lastExport();
+  if (!v) return 999;
+  return Math.round((new Date(todayISO()) - new Date(v)) / 86400000);
+}
+function downloadBackup() {
+  try {
+    var url = URL.createObjectURL(new Blob([backupText()], { type: "application/json" }));
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = backupName();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    markExport();
+    ioMsg = "файл сохранён: " + backupName();
+  } catch (e) {
+    ioMsg = "не получилось сохранить файл — используй экспорт текстом";
+  }
+  render();
+}
+function shareBackup() {
+  try {
+    var file = new File([backupText()], backupName(), { type: "application/json" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file], title: "Прогрессия", text: "Копия журнала от " + todayISO() }).then(
+        function () { markExport(); ioMsg = "копия отправлена"; render(); },
+        function () {}
+      );
+      return;
+    }
+  } catch (e) {}
+  downloadBackup();
+}
+
 /* ---------- графики ---------- */
-function chartSVG(vals, labels, color) {
+function chartSVG(vals, labels, color, steps, dotColors) {
   var W = 320, H = 180, PL = 36, PR = 12, PT = 12, PB = 26;
   if (!vals.length) return "";
-  var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+  var all = steps && steps.length ? vals.concat(steps) : vals;
+  var min = Math.min.apply(null, all), max = Math.max.apply(null, all);
   var span = max - min || Math.max(1, max * 0.1);
   var lo = min - span * 0.2, hi = max + span * 0.2;
   var X = function (i) { return vals.length < 2 ? PL + (W - PL - PR) / 2 : PL + (i * (W - PL - PR)) / (vals.length - 1); };
@@ -242,9 +293,20 @@ function chartSVG(vals, labels, color) {
     out += '<line x1="' + PL + '" y1="' + y + '" x2="' + (W - PR) + '" y2="' + y + '" stroke="#38332C" stroke-width="1"/>';
     out += '<text x="' + (PL - 6) + '" y="' + (y + 3) + '" fill="#8E8779" font-size="9" text-anchor="end">' + r1(v) + "</text>";
   });
+  if (steps && steps.length === vals.length) {
+    var sp = [];
+    steps.forEach(function (v, i) {
+      if (i && steps[i - 1] !== v) sp.push(X(i) + "," + Y(steps[i - 1]));
+      sp.push(X(i) + "," + Y(v));
+    });
+    out += '<polyline points="' + sp.join(" ") + '" fill="none" stroke="#8FA06C" stroke-width="1.5" stroke-dasharray="4 3"/>';
+  }
   var pts = vals.map(function (v, i) { return X(i) + "," + Y(v); }).join(" ");
   out += '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-  vals.forEach(function (v, i) { out += '<circle cx="' + X(i) + '" cy="' + Y(v) + '" r="2.6" fill="' + color + '"/>'; });
+  vals.forEach(function (v, i) {
+    out += '<circle cx="' + X(i) + '" cy="' + Y(v) + '" r="' + (dotColors && dotColors[i] ? 3.4 : 2.6) + '" fill="' +
+      (dotColors && dotColors[i] ? dotColors[i] : color) + '"/>';
+  });
   var idxs = vals.length <= 4 ? vals.map(function (_, i) { return i; }) : [0, Math.floor((vals.length - 1) / 2), vals.length - 1];
   idxs.forEach(function (i) {
     var anchor = i === 0 ? "start" : i === vals.length - 1 ? "end" : "middle";
@@ -291,26 +353,97 @@ function trendHTML(d, label) {
   else if (d < -0.05) { cls = "neg"; txt = "" + r1(d); arrow = "↘"; }
   return '<span class="trend ' + cls + '"><span class="lbl">' + label + "</span>" + arrow + " " + txt + "</span>";
 }
-function draftKey(exId) { return UI.weekId + "|" + UI.day + "|" + exId; }
+/* сессия = дата тренировки; неделя и день — только ярлыки */
+function sessionDate(w, day) {
+  if (!w) return todayISO();
+  if (w.dates && w.dates[day]) return w.dates[day];
+  var ds = S.logs.filter(function (l) { return l.weekId === w.id && l.day === day; })
+                 .map(function (l) { return l.date; }).sort();
+  return ds.length ? ds[ds.length - 1] : todayISO();
+}
+function curDate() { return sessionDate(currentWeek(), UI.day); }
+function setSessionDate(date) {
+  var w = currentWeek();
+  if (!w) return;
+  if (!w.dates) w.dates = {};
+  w.dates[UI.day] = date;
+}
+function draftKey(exId) { return curDate() + "|" + exId; }
 function currentEntry(exId) {
-  var f = null;
-  S.logs.forEach(function (l) { if (l.exerciseId === exId && l.weekId === UI.weekId && l.day === UI.day) f = l; });
+  var d = curDate(), f = null;
+  S.logs.forEach(function (l) { if (l.exerciseId === exId && l.date === d) f = l; });
   return f;
+}
+function prevEntry(exId) {
+  var d = curDate();
+  var list = entriesFor(exId).filter(function (l) { return l.date < d; });
+  return list[list.length - 1] || null;
 }
 function getDraft(exId) {
   var k = draftKey(exId);
   if (!drafts[k]) {
     var cur = currentEntry(exId);
     drafts[k] = cur
-      ? { sets: cur.sets.map(function (s) { return { weight: String(s.weight), reps: String(s.reps) }; }), date: cur.date, saved: true }
-      : { sets: [{ weight: "", reps: "" }], date: todayISO(), saved: false };
+      ? { sets: cur.sets.map(function (s) { return { weight: String(s.weight), reps: String(s.reps) }; }), light: !!cur.light, saved: true }
+      : { sets: [{ weight: "", reps: "" }], light: false, saved: false };
   }
   return drafts[k];
 }
+
+/* блоки двойной прогрессии: подряд идущие тренировки на одном рабочем весе */
+function topWorkingSet(e) {
+  if (!e || !e.sets || !e.sets.length) return null;
+  return e.sets.reduce(function (b, x) {
+    return !b || x.weight > b.weight || (x.weight === b.weight && x.reps > b.reps) ? x : b;
+  }, null);
+}
+function blocksFor(entries) {
+  var out = [];
+  entries.forEach(function (e) {
+    var top = topWorkingSet(e);
+    if (!top) return;
+    var last = out[out.length - 1];
+    if (last && last.weight === top.weight) {
+      last.to = top.reps;
+      last.peak = Math.max(last.peak, topE(e));
+      last.end = e.date;
+      last.count++;
+    } else {
+      out.push({ weight: top.weight, from: top.reps, to: top.reps, peak: topE(e), start: e.date, end: e.date, count: 1 });
+    }
+  });
+  return out;
+}
+function blocksHTML(entries) {
+  var b = blocksFor(entries);
+  if (b.length < 2) return "";
+  return '<div class="mono soft" style="font-size:10px;margin:4px 0 6px">блоки по рабочему весу (пик = лучший e1ПМ). Лёгкие записи и разгрузочные недели сюда не входят.</div>' +
+    '<div class="col8" style="margin-bottom:12px">' + b.slice().reverse().map(function (x, i, arr) {
+      var prev = arr[i + 1];
+      var d = prev ? r1(x.peak - prev.peak) : null;
+      return '<div class="hrow2"><span class="mono sm">' + x.weight + " кг · " +
+        (x.from === x.to ? x.to : x.from + "→" + x.to) + " повт</span>" +
+        '<span class="mono sm">пик ' + r1(x.peak) +
+        (d === null ? "" : ' <span class="' + (d > 0 ? "pos" : d < 0 ? "neg" : "soft") + '">' + (d > 0 ? "+" : "") + d + "</span>") +
+        "</span></div>";
+    }).join("") + "</div>";
+}
+// застой: последний ЗАКРЫТЫЙ блок не превзошёл предыдущий
+function stagnation(entries) {
+  var b = blocksFor(entries);
+  if (b.length < 3) return null;
+  var last = b[b.length - 2], prev = b[b.length - 3];
+  if (last.peak > prev.peak + 0.05) return null;
+  return { weight: last.weight, prevWeight: prev.weight, d: r1(last.peak - prev.peak) };
+}
+function stagnationHTML(entries) {
+  var st = stagnation(entries);
+  if (!st) return "";
+  return '<div class="neg">блок ' + st.weight + " кг закрыт не выше прошлого (" + (st.d > 0 ? "+" : "") + st.d + ")</div>";
+}
 function cardHTML(ex) {
   var all = entriesFor(ex.id), cur = currentEntry(ex.id);
-  var others = all.filter(function (e) { return !cur || e.id !== cur.id; });
-  var prev = others[others.length - 1] || null;
+  var prev = prevEntry(ex.id);
   var d = getDraft(ex.id);
   var tE = cur && prev ? r1(topE(cur) - topE(prev)) : null;
   var tV = cur && prev ? Math.round(vol(cur) - vol(prev)) : null;
@@ -328,12 +461,13 @@ function cardHTML(ex) {
     '<div class="mono xs soft meta"><div>' +
       (prev ? "пред. раз (" + fmtDate(prev.date) + "): " + sumSets(prev) : "предыдущих записей нет") + "</div>" +
       (best ? '<div class="acc">макс: ' + best.weight + "×" + best.reps + " · " + fmtDate(best.date) + "</div>" : "") +
+      stagnationHTML(blockEntries(ex.id)) +
+    "</div>" +
+    '<div class="chips" style="margin-bottom:10px">' +
+      '<button class="chip' + (d.light ? "" : " on") + '" data-act="mode:' + ex.id + ':work">рабочая</button>' +
+      '<button class="chip' + (d.light ? " on" : "") + '" data-act="mode:' + ex.id + ':light">лёгкая</button>' +
     "</div>" +
     '<div class="sets">' + rows + "</div>" +
-    '<div class="daterow"><span class="mono xs soft">дата</span>' +
-      '<input type="date" class="dateinp" value="' + esc(d.date) + '" data-inp="d:' + ex.id + ':0">' +
-      (d.date !== todayISO() ? '<button class="linkbtn" data-act="today:' + ex.id + '">сегодня</button>' : "") +
-    "</div>" +
     '<div class="btns"><button class="ghost" data-act="addset:' + ex.id + '">+ подход</button>' +
     '<button class="save' + (d.saved ? " on" : "") + '" data-act="save:' + ex.id + '">' + (d.saved ? "✓ сохранено" : "сохранить") + "</button></div></div>";
 }
@@ -349,6 +483,11 @@ function viewWeeks() {
     '</div><button class="icobtn' + (UI.editing ? " on" : "") + '" data-act="edit">✎</button></div>';
 
   if (!w) return h + '<div class="empty">недель нет — нажми +</div>';
+
+  var sd = curDate();
+  h += '<div class="daterow" style="margin:-4px 0 14px"><span class="mono xs soft">дата тренировки</span>' +
+    '<input type="date" class="dateinp" id="sessdate" value="' + esc(sd) + '">' +
+    (sd !== todayISO() ? '<button class="linkbtn" data-act="setToday">сегодня</button>' : "") + "</div>";
 
   if (UI.editing) {
     h += '<div class="col8">' + exs.map(function (ex, i) {
@@ -381,14 +520,17 @@ function sessionData() {
   });
   var by = {};
   S.logs.filter(function (l) { return l.weekId; }).forEach(function (l) {
-    var d = by[l.date] || (by[l.date] = { date: l.date, volume: 0, sets: 0, ratios: [] });
+    var d = by[l.date] || (by[l.date] = { date: l.date, volume: 0, sets: 0, ratios: [], easy: 0, total: 0 });
     d.volume += vol(l);
     d.sets += (l.sets || []).length;
+    d.total++;
+    if (l.light || isDeloadWeek(l.weekId)) d.easy++;
     if (first[l.exerciseId] > 0) d.ratios.push((topE(l) / first[l.exerciseId]) * 100);
   });
   return Object.keys(by).sort().slice(-24).map(function (k) {
     var d = by[k];
     return {
+      easy: d.total > 0 && d.easy * 2 >= d.total,
       date: fmtDate(d.date),
       volume: Math.round(d.volume),
       sets: d.sets,
@@ -402,6 +544,8 @@ function overallHTML() {
   var m = METRICS.filter(function (x) { return x.id === UI.metric; })[0];
   var vals = data.map(function (d) { return d[UI.metric]; });
   var labels = data.map(function (d) { return d.date; });
+  var dots = data.map(function (d) { return d.easy ? "#8FA06C" : null; });
+  var hasEasy = dots.some(function (x) { return x; });
   var avg = function (arr) { return arr.length ? arr.reduce(function (s, d) { return s + (d[UI.metric] || 0); }, 0) / arr.length : 0; };
   var last3 = data.slice(-3), prev3 = data.slice(-6, -3);
   var delta = prev3.length && avg(prev3) ? r1(((avg(last3) - avg(prev3)) / avg(prev3)) * 100) : null;
@@ -413,7 +557,8 @@ function overallHTML() {
     '<div class="chips" style="margin-bottom:12px">' + METRICS.map(function (x) {
       return '<button class="chip' + (UI.metric === x.id ? " on" : "") + '" data-act="metric:' + x.id + '">' + x.label + "</button>";
     }).join("") + "</div>" +
-    '<div class="chartbox">' + chartSVG(vals, labels, "#D48A5F") + "</div>" +
+    '<div class="chartbox">' + chartSVG(vals, labels, "#D48A5F", null, dots) + "</div>" +
+    (hasEasy ? '<div class="mono soft" style="font-size:10px;margin-top:4px">зелёные точки — лёгкие тренировки и разгрузочные недели; в объём и подходы они входят</div>' : "") +
     '<div class="mono xs soft" style="display:flex;justify-content:space-between"><span>3 последние тренировки к предыдущим 3</span>' +
       '<span class="' + dcls + '">' + (delta === null ? "—" : (delta > 0 ? "+" : "") + delta + "%") + "</span></div>" +
     '<div class="mono soft" style="font-size:10px;margin-top:4px">' + m.note + "</div></div>";
@@ -442,7 +587,30 @@ function progressListHTML() {
       '<span class="caret' + (open ? " open" : "") + '">›</span></span></button>';
     if (open) {
       h += '<div class="pbody"><div class="mono soft" style="font-size:10px;margin-top:8px">расчётный максимум (формула Эпли)</div>';
-      h += vals.length ? '<div class="chartbox">' + chartSVG(vals, labels, "#D48A5F") + "</div>" : '<div class="empty">пока нет записей</div>';
+      var steps = [];
+      var bl = blocksFor(it.entries.filter(countsForBlocks));
+      var carry = null;
+      it.entries.forEach(function (e, i) {
+        var hit = null;
+        bl.forEach(function (b) { if (e.date >= b.start && e.date <= b.end) hit = r1(b.peak); });
+        if (hit !== null) carry = hit;
+        steps[i] = carry;
+      });
+      if (steps.indexOf(null) === 0) {
+        var firstVal = steps.filter(function (x) { return x !== null; })[0];
+        steps = steps.map(function (x) { return x === null ? firstVal : x; });
+      }
+      h += vals.length
+        ? '<div class="chartbox">' + chartSVG(vals, labels, "#D48A5F", steps.length === vals.length ? steps : null) + "</div>" +
+          '<div class="mono soft" style="font-size:10px;margin:-6px 0 10px">оранжевая линия — e1ПМ по тренировкам, зелёные ступеньки — пик блока</div>'
+        : '<div class="empty">пока нет записей</div>';
+      var st = stagnation(it.entries.filter(countsForBlocks));
+      if (st) {
+        h += '<div class="mono neg" style="font-size:11px;margin-bottom:8px">застой: блок ' + st.weight +
+          " кг закрыт не выше блока " + st.prevWeight + " кг (" + (st.d > 0 ? "+" : "") + st.d +
+          "). Обычно это значит, что вес подняли рано или не хватает восстановления.</div>";
+      }
+      h += blocksHTML(it.entries.filter(countsForBlocks));
       h += '<div class="col8">' + it.entries.slice().reverse().map(function (l) {
         return '<div class="hrow2"><span class="mono sm soft">' + fmtDate(l.date) + '</span><span class="mono sm">' + sumSets(l) + "</span></div>";
       }).join("") + "</div></div>";
@@ -481,7 +649,21 @@ function viewBase() {
       }).join("") + "</div>";
   }).join("");
 
-  h += '<div class="card" style="margin:16px 0 24px"><div class="mono xs soft" style="margin-bottom:8px">перенос данных</div>' +
+  var le = lastExport();
+  h += '<div class="card" style="margin:16px 0 12px"><div class="mono xs soft" style="margin-bottom:8px">резервная копия</div>' +
+    '<button class="solid" data-act="share">отправить копию себе</button>' +
+    '<div style="display:flex;gap:8px;margin-top:8px">' +
+      '<button class="line" data-act="download">сохранить файл</button>' +
+      '<a class="line" href="mailto:' + MAIL + '?subject=' + encodeURIComponent("Прогрессия — копия от " + todayISO()) +
+      '&body=' + encodeURIComponent("Файл прикрепи вложением.") + '" style="text-align:center;text-decoration:none;line-height:20px">письмо на почту</a>' +
+    "</div>" +
+    '<div class="mono soft" style="font-size:10px;margin-top:8px">' +
+      (le ? "последняя копия: " + le : "копия ещё не делалась") + " · " + S.logs.length + " записей</div>" +
+    '<label class="line" style="display:block;text-align:center;margin-top:8px">загрузить из файла' +
+      '<input type="file" accept="application/json,.json" id="importfile" style="display:none"></label>' +
+    "</div>";
+
+  h += '<div class="card" style="margin:0 0 24px"><div class="mono xs soft" style="margin-bottom:8px">перенос текстом</div>' +
     '<div style="display:flex;gap:8px"><button class="line" data-act="export">экспорт</button><button class="line" data-act="importmode">импорт</button></div>';
   if (ioMode) {
     h += '<div style="margin-top:8px"><textarea id="iotext" rows="5" ' + (ioMode === "export" ? "readonly" : 'placeholder="вставь сюда текст экспорта"') + ">" + esc(ioText) + "</textarea>" +
@@ -513,6 +695,8 @@ function renderOverlay() {
     '<div class="col8" id="wmlist">' + S.weeks.map(function (w, i) {
       return '<div class="wmrow" data-row="' + i + '"><div class="handle" data-handle="' + i + '">⠿</div>' +
         '<input class="wmname" value="' + esc(w.label) + '" data-inp="wm:' + w.id + ':0">' +
+        '<button class="chip' + (w.deload ? " on" : "") + '" style="flex-shrink:0;font-size:10px;padding:4px 8px' +
+          (w.deload ? ";background:var(--acc);border-color:var(--acc)" : "") + '" data-act="deload:' + w.id + '">разгрузка</button>' +
         (confirmId === w.id
           ? '<button class="danger" data-act="wmdel:' + w.id + '">удалить</button><button class="soft" data-act="wmcancel" style="padding:4px 6px">✕</button>'
           : '<button class="soft" data-act="wmask:' + w.id + '" style="padding:4px 8px">🗑</button>') + "</div>";
@@ -525,12 +709,17 @@ function renderOverlay() {
 function render() {
   renderHead();
   var v = document.getElementById("view");
-  var banner = restoreOffer
+  var nag = daysSinceExport() > 7 && UI.tab !== "base"
+    ? '<div class="card" style="border-color:var(--acc);margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:8px">' +
+      '<span class="mono xs soft">копия не делалась ' + (daysSinceExport() > 900 ? "ни разу" : daysSinceExport() + " дн.") + "</span>" +
+      '<button class="linkbtn" data-act="backupnag">сделать копию</button></div>'
+    : "";
+  var banner = nag + (restoreOffer
     ? '<div class="card" style="border-color:var(--acc);margin-bottom:16px"><div class="mono sm">Найдена резервная копия' +
       (restoreOffer.at ? " от " + restoreOffer.at : "") + ": " + restoreOffer.count + " записей, сейчас " + restoreOffer.current + ".</div>" +
       '<div style="display:flex;gap:8px;margin-top:8px"><button class="save" data-act="restore">восстановить</button>' +
       '<button class="line" style="width:auto;padding:9px 12px" data-act="hideoffer">скрыть</button></div></div>'
-    : "";
+    : "");
   v.innerHTML = banner + (UI.tab === "weeks" ? viewWeeks() : UI.tab === "progress" ? viewProgress() : viewBase());
   renderOverlay();
 }
@@ -581,6 +770,14 @@ function handle(act) {
     if (!d2.sets.length) d2.sets.push({ weight: "", reps: "" });
     d2.saved = false; rerenderCard(a); return;
   }
+  if (k === "mode") {
+    var dm = getDraft(a);
+    dm.light = b === "light";
+    var ce = currentEntry(a);
+    if (ce) { ce.light = dm.light; persist(); }
+    rerenderCard(a);
+    return;
+  }
   if (k === "today") { getDraft(a).date = todayISO(); getDraft(a).saved = false; rerenderCard(a); return; }
   if (k === "save") { saveCard(a); return; }
   if (k === "metric") { UI.metric = a; render(); return; }
@@ -621,9 +818,20 @@ function handle(act) {
     } catch (e) { ioMsg = "не получилось прочитать — проверь, что вставлен весь текст"; render(); }
     return;
   }
+  if (k === "share") { shareBackup(); return; }
+  if (k === "download") { downloadBackup(); return; }
+  if (k === "setToday") { setSessionDate(todayISO()); drafts = {}; persist(); render(); return; }
+  if (k === "backupnag") { UI.tab = "base"; persistUI(); render(); return; }
   if (k === "restore") { ioMsg = restoreBackup() ? "данные восстановлены из копии" : "копия не найдена"; render(); return; }
   if (k === "hideoffer") { restoreOffer = null; render(); return; }
   if (k === "wmclose") { UI.managing = false; confirmId = null; renderOverlay(); render(); return; }
+  if (k === "deload") {
+    S.weeks.forEach(function (w) { if (w.id === a) w.deload = !w.deload; });
+    persist();
+    renderOverlay();
+    render();
+    return;
+  }
   if (k === "wmask") { confirmId = a; renderOverlay(); return; }
   if (k === "wmcancel") { confirmId = null; renderOverlay(); return; }
   if (k === "wmdel") {
@@ -633,17 +841,41 @@ function handle(act) {
     confirmId = null; drafts = {}; persist(); persistUI(); renderOverlay(); render(); return;
   }
 }
-function saveCard(exId) {
+function saveCard(exId, silent) {
   var d = getDraft(exId);
-  var parsed = d.sets.map(function (s) { return { weight: num(s.weight), reps: num(s.reps) }; }).filter(function (s) { return s.weight > 0 && s.reps > 0; });
+  var parsed = d.sets.map(function (s) { return { weight: num(s.weight), reps: num(s.reps) }; })
+                     .filter(function (s) { return s.weight > 0 && s.reps > 0; });
   if (!parsed.length) return;
-  var date = d.date || todayISO();
+  var date = curDate();
   var cur = currentEntry(exId);
-  if (cur) { cur.sets = parsed; cur.date = date; }
-  else S.logs.push({ id: uid(), exerciseId: exId, date: date, sets: parsed, weekId: UI.weekId, day: UI.day });
+  if (cur) { cur.sets = parsed; cur.date = date; cur.light = !!d.light; }
+  else S.logs.push({ id: uid(), exerciseId: exId, date: date, sets: parsed, weekId: UI.weekId, day: UI.day, light: !!d.light });
+  // одна запись на упражнение и дату
+  var seen = false;
+  S.logs = S.logs.filter(function (l) {
+    if (l.exerciseId !== exId || l.date !== date) return true;
+    if (seen) return false;
+    seen = true;
+    return true;
+  });
   d.saved = true;
   persist();
-  rerenderCard(exId);
+  if (silent) {
+    var b = document.querySelector("#card-" + exId + " .save");
+    if (b) { b.classList.add("on"); b.textContent = "✓ сохранено"; }
+  } else {
+    rerenderCard(exId);
+  }
+}
+
+/* автосохранение через 5 секунд после последнего ввода */
+var autoTimers = {};
+function scheduleAutosave(exId) {
+  if (autoTimers[exId]) clearTimeout(autoTimers[exId]);
+  autoTimers[exId] = setTimeout(function () {
+    delete autoTimers[exId];
+    saveCard(exId, true);
+  }, 5000);
 }
 
 /* ---------- события ---------- */
@@ -659,6 +891,14 @@ document.addEventListener("input", function (e) {
   if (t.id === "addq") { UI.addQuery = t.value; document.getElementById("addres").innerHTML = addResultsHTML(); return; }
   if (t.id === "q") { UI.query = t.value; document.getElementById("plist").innerHTML = progressListHTML(); return; }
   if (t.id === "iotext") { ioText = t.value; return; }
+  if (t.id === "sessdate") {
+    if (!t.value) return;
+    setSessionDate(t.value);
+    drafts = {};
+    persist();
+    render();
+    return;
+  }
   var key = t.dataset.inp;
   if (!key) return;
   var p = key.split(":"), kind = p[0], id = p[1], i = +p[2];
@@ -674,6 +914,27 @@ document.addEventListener("input", function (e) {
   d.saved = false;
   var btn = document.querySelector("#card-" + id + " .save");
   if (btn) { btn.classList.remove("on"); btn.textContent = "сохранить"; }
+  scheduleAutosave(id);
+});
+
+/* импорт из файла */
+document.addEventListener("change", function (e) {
+  if (e.target.id !== "importfile" || !e.target.files || !e.target.files[0]) return;
+  var r = new FileReader();
+  r.onload = function () {
+    try {
+      var d = JSON.parse(r.result);
+      if (!d.exercises || !d.logs) throw 0;
+      S.exercises = d.exercises; S.logs = d.logs; S.weeks = d.weeks || [];
+      drafts = {};
+      ioMsg = "загружено из файла: " + S.logs.length + " записей";
+      persist(); render();
+    } catch (err) {
+      ioMsg = "файл не читается — нужен json, сохранённый этим приложением";
+      render();
+    }
+  };
+  r.readAsText(e.target.files[0]);
 });
 
 /* перетаскивание недель */
