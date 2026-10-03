@@ -200,6 +200,41 @@ function loadData() {
   if (!applied && hasLogs(b) > hasLogs(d)) restoreOffer = { count: b.logs.length, at: b.savedAt || null, current: hasLogs(d) };
   return { exercises: d.exercises || [], logs: d.logs || [], weeks: d.weeks || [] };
 }
+function applyPlan(d) {
+  if (!d || !Array.isArray(d.plan)) return null;
+  var created = [], added = 0;
+  function resolve(item) {
+    var name = typeof item === "string" ? item : item && item.name;
+    var group = typeof item === "object" && item ? item.group : null;
+    if (!name) return null;
+    var found = null;
+    S.exercises.forEach(function (e) {
+      if (e.name.trim().toLowerCase() === String(name).trim().toLowerCase()) found = e;
+    });
+    if (found) return found.id;
+    var ex = { id: uid(), name: String(name).trim(), group: group && GROUPS.indexOf(group) >= 0 ? group : GROUPS[0], day: null };
+    S.exercises.push(ex);
+    created.push(ex.name);
+    return ex.id;
+  }
+  var nums = S.weeks.map(function (w) { var m = w.label.match(/\d+/); return m ? +m[0] : 0; });
+  var next = (nums.length ? Math.max.apply(null, nums) : 0) + 1;
+  d.plan.forEach(function (p) {
+    var days = { 1: [], 2: [], 3: [] };
+    [1, 2, 3].forEach(function (dd) {
+      ((p.days && (p.days[dd] || p.days[String(dd)])) || []).forEach(function (item) {
+        var id = resolve(item);
+        if (id) days[dd].push(id);
+      });
+    });
+    S.weeks.push({ id: uid(), label: p.label || ("Неделя " + next), archived: false, deload: !!p.deload, days: days });
+    next++;
+    added++;
+  });
+  persist();
+  return "добавлено недель: " + added + (created.length ? " · новых упражнений: " + created.length + " (" + created.join(", ") + ") — проверь группы в базе" : "") + " · журнал не тронут";
+}
+
 function restoreBackup() {
   var b = readKey(BKEY);
   if (!hasLogs(b)) return false;
@@ -335,10 +370,12 @@ function renderHead() {
 }
 
 /* ---------- вкладка «Тренировки» ---------- */
+function activeWeeks() { return S.weeks.filter(function (w) { return !w.archived; }); }
+function archivedWeeks() { return S.weeks.filter(function (w) { return w.archived; }); }
 function currentWeek() {
-  var w = null;
-  S.weeks.forEach(function (x) { if (x.id === UI.weekId) w = x; });
-  if (!w) w = S.weeks[S.weeks.length - 1] || null;
+  var w = null, act = activeWeeks();
+  S.weeks.forEach(function (x) { if (x.id === UI.weekId && !x.archived) w = x; });
+  if (!w) w = act[act.length - 1] || null;
   if (w) UI.weekId = w.id;
   return w;
 }
@@ -476,7 +513,7 @@ function viewWeeks() {
   var list = dayList();
   var exs = list.map(exById).filter(Boolean);
   var h = '<div class="chips" style="margin-bottom:12px">' +
-    S.weeks.map(function (x) { return '<button class="chip' + (x.id === UI.weekId ? " on" : "") + '" data-act="week:' + x.id + '">' + esc(x.label) + "</button>"; }).join("") +
+    activeWeeks().map(function (x) { return '<button class="chip' + (x.id === UI.weekId ? " on" : "") + '" data-act="week:' + x.id + '">' + esc(x.label) + "</button>"; }).join("") +
     '<button class="icobtn" data-act="addweek">+</button><button class="icobtn" data-act="manage">≡</button></div>';
   h += '<div class="rowbetween"><div class="chips">' +
     [1, 2, 3].map(function (d) { return '<button class="chip' + (UI.day === d ? " on" : "") + '" data-act="day:' + d + '">День ' + d + "</button>"; }).join("") +
@@ -663,7 +700,7 @@ function viewBase() {
       '<input type="file" accept="application/json,.json" id="importfile" style="display:none"></label>' +
     "</div>";
 
-  h += '<div class="card" style="margin:0 0 24px"><div class="mono xs soft" style="margin-bottom:8px">перенос текстом</div>' +
+  h += '<div class="card" style="margin:0 0 24px"><div class="mono xs soft" style="margin-bottom:8px">перенос текстом · сюда же вставляется новый план</div>' +
     '<div style="display:flex;gap:8px"><button class="line" data-act="export">экспорт</button><button class="line" data-act="importmode">импорт</button></div>';
   if (ioMode) {
     h += '<div style="margin-top:8px"><textarea id="iotext" rows="5" ' + (ioMode === "export" ? "readonly" : 'placeholder="вставь сюда текст экспорта"') + ">" + esc(ioText) + "</textarea>" +
@@ -692,15 +729,24 @@ function renderOverlay() {
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">' +
       '<div style="font-weight:600;font-size:20px">Недели</div><button class="soft" data-act="wmclose" style="font-size:20px">✕</button></div>' +
     '<div class="mono xs soft" style="margin-bottom:12px">тяни за ручку, чтобы поменять порядок · нажми на название, чтобы переименовать</div>' +
-    '<div class="col8" id="wmlist">' + S.weeks.map(function (w, i) {
+    '<div class="col8" id="wmlist">' + activeWeeks().map(function (w, i) {
       return '<div class="wmrow" data-row="' + i + '"><div class="handle" data-handle="' + i + '">⠿</div>' +
         '<input class="wmname" value="' + esc(w.label) + '" data-inp="wm:' + w.id + ':0">' +
+        '<button class="chip" style="flex-shrink:0;font-size:10px;padding:4px 8px" data-act="arch:' + w.id + '">в историю</button>' +
         '<button class="chip' + (w.deload ? " on" : "") + '" style="flex-shrink:0;font-size:10px;padding:4px 8px' +
           (w.deload ? ";background:var(--acc);border-color:var(--acc)" : "") + '" data-act="deload:' + w.id + '">разгрузка</button>' +
         (confirmId === w.id
           ? '<button class="danger" data-act="wmdel:' + w.id + '">удалить</button><button class="soft" data-act="wmcancel" style="padding:4px 6px">✕</button>'
           : '<button class="soft" data-act="wmask:' + w.id + '" style="padding:4px 8px">🗑</button>') + "</div>";
     }).join("") + "</div>" +
+    (archivedWeeks().length
+      ? '<div class="mono xs soft" style="margin:16px 0 8px">история (' + archivedWeeks().length + ')</div>' +
+        '<div class="col8">' + archivedWeeks().map(function (w) {
+          return '<div class="wmrow" style="opacity:.6"><span class="wmname">' + esc(w.label) + "</span>" +
+            '<button class="chip" style="flex-shrink:0;font-size:10px;padding:4px 8px" data-act="arch:' + w.id + '">вернуть</button>' +
+            '<button class="soft" data-act="wmask:' + w.id + '" style="padding:4px 8px">🗑</button></div>';
+        }).join("") + "</div>"
+      : "") +
     (confirmId ? '<div class="mono xs neg" style="margin-top:12px">вместе с неделей удалятся все записи, привязанные к ней</div>' : "") +
     "</div></div>";
 }
@@ -740,7 +786,7 @@ function handle(act) {
     var cw = currentWeek();
     var nums = S.weeks.map(function (w) { var m = w.label.match(/\d+/); return m ? +m[0] : 0; });
     var n = (nums.length ? Math.max.apply(null, nums) : 0) + 1;
-    var w = { id: uid(), label: "Неделя " + n, days: cw ? JSON.parse(JSON.stringify(cw.days)) : { 1: [], 2: [], 3: [] } };
+    var w = { id: uid(), label: "Неделя " + n, archived: false, days: cw ? JSON.parse(JSON.stringify(cw.days)) : { 1: [], 2: [], 3: [] } };
     S.weeks.push(w); UI.weekId = w.id; UI.day = 1; persist(); persistUI(); render(); return;
   }
   if (k === "up" || k === "down") {
@@ -810,6 +856,9 @@ function handle(act) {
   if (k === "doimport") {
     try {
       var d3 = JSON.parse(ioText);
+      if (d3 && Array.isArray(d3.plan)) {
+        ioMsg = applyPlan(d3); ioMode = null; ioText = ""; render(); return;
+      }
       if (!d3.exercises || !d3.logs) throw 0;
       S.exercises = d3.exercises; S.logs = d3.logs; S.weeks = d3.weeks || [];
       drafts = {}; ioMode = null; ioText = "";
@@ -830,6 +879,13 @@ function handle(act) {
     persist();
     renderOverlay();
     render();
+    return;
+  }
+  if (k === "arch") {
+    S.weeks.forEach(function (w) { if (w.id === a) w.archived = !w.archived; });
+    if (UI.weekId === a) { var act = activeWeeks(); UI.weekId = act.length ? act[act.length - 1].id : null; }
+    drafts = {};
+    persist(); persistUI(); renderOverlay(); render();
     return;
   }
   if (k === "wmask") { confirmId = a; renderOverlay(); return; }
@@ -924,6 +980,7 @@ document.addEventListener("change", function (e) {
   r.onload = function () {
     try {
       var d = JSON.parse(r.result);
+      if (d && Array.isArray(d.plan)) { ioMsg = applyPlan(d); render(); return; }
       if (!d.exercises || !d.logs) throw 0;
       S.exercises = d.exercises; S.logs = d.logs; S.weeks = d.weeks || [];
       drafts = {};
