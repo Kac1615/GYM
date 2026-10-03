@@ -129,6 +129,7 @@ var METRICS = [
 
 var S, UI, drafts = {}, ioText = "", ioMode = null, ioMsg = "";
 var MAIL = "K_artem16@mail.ru", EKEY = "gym-export-at";
+var dateNote = "";
 
 /* ---------- утилиты ---------- */
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
@@ -524,7 +525,8 @@ function viewWeeks() {
   var sd = curDate();
   h += '<div class="daterow" style="margin:-4px 0 14px"><span class="mono xs soft">дата тренировки</span>' +
     '<input type="date" class="dateinp" id="sessdate" value="' + esc(sd) + '">' +
-    (sd !== todayISO() ? '<button class="linkbtn" data-act="setToday">сегодня</button>' : "") + "</div>";
+    (sd !== todayISO() ? '<button class="linkbtn" data-act="setToday">сегодня</button>' : "") + "</div>" +
+    (dateNote ? '<div class="mono xs acc" style="margin:-8px 0 12px">' + esc(dateNote) + "</div>" : "");
 
   if (UI.editing) {
     h += '<div class="col8">' + exs.map(function (ex, i) {
@@ -778,8 +780,8 @@ function rerenderCard(exId) {
 function handle(act) {
   var p = act.split(":"), k = p[0], a = p[1], b = p[2];
   if (k === "tab") { UI.tab = a; UI.editing = false; persistUI(); render(); return; }
-  if (k === "week") { UI.weekId = a; UI.editing = false; persistUI(); render(); return; }
-  if (k === "day") { UI.day = +a; persistUI(); render(); return; }
+  if (k === "week") { UI.weekId = a; UI.editing = false; dateNote = ""; persistUI(); render(); return; }
+  if (k === "day") { UI.day = +a; dateNote = ""; persistUI(); render(); return; }
   if (k === "edit") { UI.editing = !UI.editing; UI.addQuery = ""; render(); return; }
   if (k === "manage") { UI.managing = true; confirmId = null; renderOverlay(); return; }
   if (k === "addweek") {
@@ -949,7 +951,19 @@ document.addEventListener("input", function (e) {
   if (t.id === "iotext") { ioText = t.value; return; }
   if (t.id === "sessdate") {
     if (!t.value) return;
-    setSessionDate(t.value);
+    var wk = currentWeek(), oldDate = curDate(), newDate = t.value;
+    var moved = 0, kept = 0;
+    if (wk && oldDate !== newDate) {
+      S.logs.forEach(function (l) {
+        if (l.weekId !== wk.id || l.day !== UI.day || l.date !== oldDate) return;
+        var clash = S.logs.some(function (x) { return x !== l && x.exerciseId === l.exerciseId && x.date === newDate; });
+        if (clash) { kept++; return; }
+        l.date = newDate;
+        moved++;
+      });
+    }
+    dateNote = moved ? "записи перенесены на новую дату: " + moved + (kept ? " · " + kept + " остались, на новой дате уже есть запись" : "") : "";
+    setSessionDate(newDate);
     drafts = {};
     persist();
     render();
