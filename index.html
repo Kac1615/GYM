@@ -500,6 +500,12 @@ function cardHTML(ex) {
       (prev ? "пред. раз (" + fmtDate(prev.date) + "): " + sumSets(prev) : "предыдущих записей нет") + "</div>" +
       (best ? '<div class="acc">макс: ' + best.weight + "×" + best.reps + " · " + fmtDate(best.date) + "</div>" : "") +
       stagnationHTML(blockEntries(ex.id)) +
+      (function () {
+        var h3 = blockEntries(ex.id).filter(function (e) { return !cur || e.id !== cur.id; }).slice(-3);
+        return h3.length === 3 && h3.every(function (e) { return e.rpe === "max"; })
+          ? '<div class="neg">три рабочие подряд в отказ — пора разгрузить это движение</div>'
+          : "";
+      })() +
     "</div>" +
     '<div class="chips" style="margin-bottom:10px">' +
       '<button class="chip' + (d.light ? "" : " on") + '" data-act="mode:' + ex.id + ':work">рабочая</button>' +
