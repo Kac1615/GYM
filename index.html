@@ -580,6 +580,7 @@ function sessionData() {
       volume: Math.round(d.volume),
       sets: d.sets,
       hard: d.ratios.length,
+      total: d.total,
       index: d.ratios.length ? r1(d.ratios.reduce(function (a, b) { return a + b; }, 0) / d.ratios.length) : null
     };
   });
@@ -592,7 +593,7 @@ function overallHTML() {
   var vals = data.map(function (d) { return d[UI.metric]; });
   var labels = data.map(function (d) { return d.date; });
   var dots = UI.metric === "index"
-    ? data.map(function (d) { return d.hard < 3 ? "#8E8779" : null; })
+    ? data.map(function (d) { return d.hard < 3 || d.hard * 2 <= d.total ? "#8E8779" : null; })
     : data.map(function (d) { return d.easy ? "#8FA06C" : null; });
   var hasEasy = UI.metric !== "index" && dots.some(function (x) { return x; });
   var thin = UI.metric === "index" && dots.some(function (x) { return x; });
@@ -610,7 +611,7 @@ function overallHTML() {
     '<div class="chartbox">' + chartSVG(vals, labels, "#D48A5F", null, dots) + "</div>" +
     (UI.metric === "index"
       ? '<div class="mono soft" style="font-size:10px;margin-top:4px">только рабочие подходы: лёгкие записи и разгрузочные недели сюда не входят' +
-        (thin ? '. Серые точки собраны из одного-двух рабочих упражнений — выборка узкая' : "") + "</div>"
+        (thin ? '. Серые точки — там рабочих упражнений было мало, половина дня и меньше' : "") + "</div>"
       : hasEasy ? '<div class="mono soft" style="font-size:10px;margin-top:4px">зелёные точки — лёгкие тренировки и разгрузочные недели; в объём и подходы они входят</div>' : "") +
     '<div class="mono xs soft" style="display:flex;justify-content:space-between"><span>3 последние тренировки к предыдущим 3</span>' +
       '<span class="' + dcls + '">' + (delta === null ? "—" : (delta > 0 ? "+" : "") + delta + "%") + "</span></div>" +
